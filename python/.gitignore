@@ -1,0 +1,8 @@
+/.vscode
+
+/target
+/test-data
+/test-data-*
+
+/spann-store
+spann.index
