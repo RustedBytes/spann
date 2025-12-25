@@ -1,6 +1,7 @@
 # spann
 
 [![Crates.io Version](https://img.shields.io/crates/v/spann)](https://crates.io/crates/spann)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-yellow.svg)](https://github.com/RustedBytes/spann/blob/master/LICENSE)
 
 A proof-of-concept implementation of a SPANN-style approximate nearest neighbor index in Rust.
 This project focuses on a readable, hackable baseline that still exercises core SPANN ideas:
