@@ -32,8 +32,8 @@ Optionally pass `vectors_per_file` as a second argument to control batch size:
 cargo run --release -- /path/to/store_dir 2048
 ```
 
-The demo in `src/main.rs` generates 1,000,000 vectors of dimension 128 (two clusters),
-builds the index, and runs a k-NN query against it.
+The demo in `src/main.rs` generates 1,000,000 `f16` vectors of dimension 128 (two clusters),
+builds the index with `k=2` centroids and `epsilon=0.15`, and runs a `k=3` query against it.
 
 ## Library usage
 
@@ -56,13 +56,15 @@ let rng_factor = 0.1;
 let results = index.search(&query, k, rng_factor);
 ```
 
+`results` contains `(vector_id, squared_distance)` pairs ordered from nearest to farthest.
+
 ## How it works (at a high level)
 
 1. **Build**
    - Seed `k` centroids from the first vectors and run a small, fixed number of k-means
      iterations for refinement.
    - Assign each vector to all centroids within an epsilon-closure distance.
-  - Store raw vectors on disk in batch files inside a directory.
+   - Store raw vectors on disk in batch files inside a directory.
 
 2. **Search**
    - Compute distances from the query to all centroids.
