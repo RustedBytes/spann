@@ -1,0 +1,15 @@
+[package]
+name = "spann"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+half = "2.7.1"
+ndarray = "0.17.1"
+
+[profile.release]
+opt-level = 3       # Maximize optimizations (default is 3, but explicit is good)
+lto = "fat"         # Enable Link Time Optimization (cross-crate optimization)
+codegen-units = 1   # Reduce parallel code generation to allow better optimization passes
+panic = "abort"     # Crash on panic immediately (removes unwinding overhead)
+strip = true        # Strip symbols from binary (reduces size, slightly faster load)
