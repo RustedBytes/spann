@@ -6,6 +6,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
+#[cfg(target_arch = "x86")]
+use std::arch::x86 as arch;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64 as arch;
+
 use half::f16;
 use ndarray::{Array1, Zip};
 
@@ -19,6 +26,12 @@ pub trait Scalar: Copy {
     fn from_le_bytes(bytes: &[u8]) -> Self;
     fn from_f32(value: f32) -> Self;
     fn into_f32(self) -> f32;
+    fn squared_euclidean(a: &Vector<Self>, b: &Vector<Self>) -> f32 {
+        Zip::from(a).and(b).fold(0.0, |acc, &x, &y| {
+            let diff = x.into_f32() - y.into_f32();
+            acc + diff * diff
+        })
+    }
 }
 
 impl Scalar for f32 {
@@ -40,6 +53,26 @@ impl Scalar for f32 {
 
     fn into_f32(self) -> f32 {
         self
+    }
+
+    fn squared_euclidean(a: &Vector<Self>, b: &Vector<Self>) -> f32 {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let a_slice = a.as_slice().expect("Array1 must be contiguous");
+            let b_slice = b.as_slice().expect("Array1 must be contiguous");
+
+            if is_x86_feature_detected!("avx2") {
+                unsafe { return squared_euclidean_f32_avx2(a_slice, b_slice) };
+            }
+            if is_x86_feature_detected!("sse2") {
+                unsafe { return squared_euclidean_f32_sse2(a_slice, b_slice) };
+            }
+        }
+
+        Zip::from(a).and(b).fold(0.0, |acc, &x, &y| {
+            let diff = x - y;
+            acc + diff * diff
+        })
     }
 }
 
@@ -526,8 +559,61 @@ impl<T: Scalar> SpannIndex<T> {
 /// Computes Squared Euclidean Distance to avoid expensive SQRT operations during comparison.
 #[inline(always)]
 fn squared_euclidean<T: Scalar>(a: &Vector<T>, b: &Vector<T>) -> f32 {
-    Zip::from(a).and(b).fold(0.0, |acc, &x, &y| {
-        let diff = x.into_f32() - y.into_f32();
-        acc + diff * diff
-    })
+    T::squared_euclidean(a, b)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn squared_euclidean_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = arch::_mm256_setzero_ps();
+    let mut i = 0;
+    let len = a.len();
+
+    while i + 8 <= len {
+        let va = arch::_mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = arch::_mm256_loadu_ps(b.as_ptr().add(i));
+        let diff = arch::_mm256_sub_ps(va, vb);
+        acc = arch::_mm256_add_ps(acc, arch::_mm256_mul_ps(diff, diff));
+        i += 8;
+    }
+
+    let mut lanes = [0.0f32; 8];
+    arch::_mm256_storeu_ps(lanes.as_mut_ptr(), acc);
+    let mut total = lanes.iter().sum();
+
+    while i < len {
+        let diff = *a.get_unchecked(i) - *b.get_unchecked(i);
+        total += diff * diff;
+        i += 1;
+    }
+
+    total
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn squared_euclidean_f32_sse2(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = arch::_mm_setzero_ps();
+    let mut i = 0;
+    let len = a.len();
+
+    while i + 4 <= len {
+        let va = arch::_mm_loadu_ps(a.as_ptr().add(i));
+        let vb = arch::_mm_loadu_ps(b.as_ptr().add(i));
+        let diff = arch::_mm_sub_ps(va, vb);
+        acc = arch::_mm_add_ps(acc, arch::_mm_mul_ps(diff, diff));
+        i += 4;
+    }
+
+    let mut lanes = [0.0f32; 4];
+    arch::_mm_storeu_ps(lanes.as_mut_ptr(), acc);
+    let mut total = lanes.iter().sum();
+
+    while i < len {
+        let diff = *a.get_unchecked(i) - *b.get_unchecked(i);
+        total += diff * diff;
+        i += 1;
+    }
+
+    total
 }
