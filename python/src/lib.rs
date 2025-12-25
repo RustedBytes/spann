@@ -1,12 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use ::spann::SpannIndex;
 use half::f16;
 use ndarray::Array1;
 use pyo3::Bound;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use ::spann::SpannIndex;
+
+const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_INDEX_FILENAME: &str = "spann.index";
 
 fn runtime_err(message: String) -> PyErr {
     PyRuntimeError::new_err(message)
@@ -99,6 +102,15 @@ fn vector_to_array1_f16(vector: Vec<f32>, dimension: usize, label: &str) -> PyRe
         converted.push(f16::from_f32(value));
     }
     Ok(Array1::from(converted))
+}
+
+fn index_path_from_dir(dir: &Path) -> PathBuf {
+    dir.join(DEFAULT_INDEX_FILENAME)
+}
+
+#[pyfunction]
+fn cargo_version() -> &'static str {
+    CARGO_PKG_VERSION
 }
 
 #[pyclass]
@@ -211,6 +223,74 @@ struct SpannIndexF32Meta {
 
 #[pymethods]
 impl SpannIndexF32Meta {
+    #[staticmethod]
+    fn build_with_metadata_in_dir(
+        vectors: Vec<Vec<f32>>,
+        metadata: Vec<usize>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        base_dir: PathBuf,
+    ) -> PyResult<Self> {
+        ensure_k_centroids(k_centroids)?;
+        let dimension = ensure_vectors_f32(&vectors)?;
+        if metadata.len() != vectors.len() {
+            return Err(PyValueError::new_err(format!(
+                "metadata has {} entries but {} vectors were provided",
+                metadata.len(),
+                vectors.len()
+            )));
+        }
+        let data = vectors_to_array1_f32(vectors, dimension)?;
+        let store_dir = base_dir.clone();
+        let inner = SpannIndex::build_with_metadata_and_store_dir(
+            dimension,
+            data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+        )
+        .map_err(runtime_err)?;
+        let index = Self { inner };
+        index.save_to_dir(base_dir)?;
+        Ok(index)
+    }
+
+    #[staticmethod]
+    fn build_with_metadata_in_dir_and_batch(
+        vectors: Vec<Vec<f32>>,
+        metadata: Vec<usize>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        base_dir: PathBuf,
+        vectors_per_file: usize,
+    ) -> PyResult<Self> {
+        ensure_k_centroids(k_centroids)?;
+        let dimension = ensure_vectors_f32(&vectors)?;
+        if metadata.len() != vectors.len() {
+            return Err(PyValueError::new_err(format!(
+                "metadata has {} entries but {} vectors were provided",
+                metadata.len(),
+                vectors.len()
+            )));
+        }
+        let data = vectors_to_array1_f32(vectors, dimension)?;
+        let store_dir = base_dir.clone();
+        let inner = SpannIndex::build_with_metadata_and_store_dir_and_batch(
+            dimension,
+            data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+            vectors_per_file,
+        )
+        .map_err(runtime_err)?;
+        let index = Self { inner };
+        index.save_to_dir(base_dir)?;
+        Ok(index)
+    }
+
     #[staticmethod]
     fn build_with_metadata(
         vectors: Vec<Vec<f32>>,
@@ -332,6 +412,13 @@ impl SpannIndexF32Meta {
     }
 
     #[staticmethod]
+    fn load_from_dir(base_dir: PathBuf) -> PyResult<Self> {
+        let index_path = index_path_from_dir(&base_dir);
+        let inner = SpannIndex::<f32, usize>::load_from_path(index_path).map_err(runtime_err)?;
+        Ok(Self { inner })
+    }
+
+    #[staticmethod]
     fn load(path: PathBuf) -> PyResult<Self> {
         let inner = SpannIndex::<f32, usize>::load_from_path(path).map_err(runtime_err)?;
         Ok(Self { inner })
@@ -380,6 +467,11 @@ impl SpannIndexF32Meta {
 
     fn save(&self, path: PathBuf) -> PyResult<()> {
         self.inner.save_to_path(path).map_err(runtime_err)
+    }
+
+    fn save_to_dir(&self, base_dir: PathBuf) -> PyResult<()> {
+        let index_path = index_path_from_dir(&base_dir);
+        self.inner.save_to_path(index_path).map_err(runtime_err)
     }
 }
 
@@ -494,6 +586,74 @@ struct SpannIndexF16Meta {
 #[pymethods]
 impl SpannIndexF16Meta {
     #[staticmethod]
+    fn build_with_metadata_in_dir(
+        vectors: Vec<Vec<f32>>,
+        metadata: Vec<usize>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        base_dir: PathBuf,
+    ) -> PyResult<Self> {
+        ensure_k_centroids(k_centroids)?;
+        let dimension = ensure_vectors_f32(&vectors)?;
+        if metadata.len() != vectors.len() {
+            return Err(PyValueError::new_err(format!(
+                "metadata has {} entries but {} vectors were provided",
+                metadata.len(),
+                vectors.len()
+            )));
+        }
+        let data = vectors_to_array1_f16(vectors, dimension)?;
+        let store_dir = base_dir.clone();
+        let inner = SpannIndex::build_with_metadata_and_store_dir(
+            dimension,
+            data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+        )
+        .map_err(runtime_err)?;
+        let index = Self { inner };
+        index.save_to_dir(base_dir)?;
+        Ok(index)
+    }
+
+    #[staticmethod]
+    fn build_with_metadata_in_dir_and_batch(
+        vectors: Vec<Vec<f32>>,
+        metadata: Vec<usize>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        base_dir: PathBuf,
+        vectors_per_file: usize,
+    ) -> PyResult<Self> {
+        ensure_k_centroids(k_centroids)?;
+        let dimension = ensure_vectors_f32(&vectors)?;
+        if metadata.len() != vectors.len() {
+            return Err(PyValueError::new_err(format!(
+                "metadata has {} entries but {} vectors were provided",
+                metadata.len(),
+                vectors.len()
+            )));
+        }
+        let data = vectors_to_array1_f16(vectors, dimension)?;
+        let store_dir = base_dir.clone();
+        let inner = SpannIndex::build_with_metadata_and_store_dir_and_batch(
+            dimension,
+            data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+            vectors_per_file,
+        )
+        .map_err(runtime_err)?;
+        let index = Self { inner };
+        index.save_to_dir(base_dir)?;
+        Ok(index)
+    }
+
+    #[staticmethod]
     fn build_with_metadata(
         vectors: Vec<Vec<f32>>,
         metadata: Vec<usize>,
@@ -614,6 +774,13 @@ impl SpannIndexF16Meta {
     }
 
     #[staticmethod]
+    fn load_from_dir(base_dir: PathBuf) -> PyResult<Self> {
+        let index_path = index_path_from_dir(&base_dir);
+        let inner = SpannIndex::<f16, usize>::load_from_path(index_path).map_err(runtime_err)?;
+        Ok(Self { inner })
+    }
+
+    #[staticmethod]
     fn load(path: PathBuf) -> PyResult<Self> {
         let inner = SpannIndex::<f16, usize>::load_from_path(path).map_err(runtime_err)?;
         Ok(Self { inner })
@@ -663,10 +830,17 @@ impl SpannIndexF16Meta {
     fn save(&self, path: PathBuf) -> PyResult<()> {
         self.inner.save_to_path(path).map_err(runtime_err)
     }
+
+    fn save_to_dir(&self, base_dir: PathBuf) -> PyResult<()> {
+        let index_path = index_path_from_dir(&base_dir);
+        self.inner.save_to_path(index_path).map_err(runtime_err)
+    }
 }
 
 #[pymodule]
 fn spann(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add("__version__", CARGO_PKG_VERSION)?;
+    module.add_function(wrap_pyfunction!(cargo_version, module)?)?;
     module.add_class::<SpannIndexF32>()?;
     module.add_class::<SpannIndexF32Meta>()?;
     module.add_class::<SpannIndexF16>()?;

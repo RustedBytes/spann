@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "spann"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python bindings for the spann Rust crate."
 readme = "README.md"
 requires-python = ">=3.10"

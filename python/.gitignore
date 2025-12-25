@@ -4,5 +4,7 @@
 /test-data
 /test-data-*
 
+/dist
+
 /spann-store
 spann.index
