@@ -197,8 +197,12 @@ impl<T: Scalar> DataStore<T> {
 
         let existing_batches = Self::list_batch_ids(&dir)?;
         if !existing_batches.is_empty() {
-            let count =
-                Self::count_vectors_in_batches(&dir, &existing_batches, record_len, vectors_per_file)?;
+            let count = Self::count_vectors_in_batches(
+                &dir,
+                &existing_batches,
+                record_len,
+                vectors_per_file,
+            )?;
             if count != vectors.len() {
                 return Err(format!(
                     "Data store has {count} vectors but {expected} were provided",
@@ -244,7 +248,10 @@ impl<T: Scalar> DataStore<T> {
             .unwrap_or_else(|err| panic!("Failed to open batch file {}: {err}", path.display()));
 
         if let Err(err) = file.seek(SeekFrom::Start(offset as u64)) {
-            panic!("Failed to seek to vector {id:?} in {}: {err}", path.display());
+            panic!(
+                "Failed to seek to vector {id:?} in {}: {err}",
+                path.display()
+            );
         }
 
         let mut buffer = vec![0u8; record_len];
@@ -296,7 +303,7 @@ impl<T: Scalar> DataStore<T> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .truncate(true)
             .open(&path)
             .map_err(|err| format!("Failed to open batch file {}: {err}", path.display()))?;
         let file_len = file
@@ -391,12 +398,19 @@ impl<T: Scalar> DataStore<T> {
 
     fn list_batch_ids(dir: &Path) -> Result<Vec<usize>, String> {
         let mut ids = Vec::new();
-        let entries = std::fs::read_dir(dir)
-            .map_err(|err| format!("Failed to read data store directory {}: {err}", dir.display()))?;
+        let entries = std::fs::read_dir(dir).map_err(|err| {
+            format!(
+                "Failed to read data store directory {}: {err}",
+                dir.display()
+            )
+        })?;
 
         for entry in entries {
             let entry = entry.map_err(|err| {
-                format!("Failed to read entry in data store {}: {err}", dir.display())
+                format!(
+                    "Failed to read entry in data store {}: {err}",
+                    dir.display()
+                )
             })?;
             let file_type = entry
                 .file_type()
@@ -423,7 +437,9 @@ impl<T: Scalar> DataStore<T> {
     ) -> Result<usize, String> {
         for (expected, id) in batch_ids.iter().enumerate() {
             if *id != expected {
-                return Err(format!("Data store is missing batch file for id {expected}"));
+                return Err(format!(
+                    "Data store is missing batch file for id {expected}"
+                ));
             }
         }
 
@@ -481,12 +497,14 @@ struct PostingList<T: Scalar> {
     members: Vec<VectorId>,
 }
 
-pub struct SpannIndex<T: Scalar> {
+pub struct SpannIndex<T: Scalar, M = ()> {
     dimension: usize,
     /// Centroids kept in memory for fast coarse-grained search.
     posting_lists: Vec<PostingList<T>>,
     /// The "disk" storage containing the actual full vectors.
     store: DataStore<T>,
+    /// Metadata aligned with vector IDs (index 0 matches vector 0).
+    metadata: Vec<M>,
     /// Hyperparameter: epsilon for soft assignment (closure).
     epsilon_closure: f32,
 }
@@ -519,7 +537,7 @@ impl PartialOrd for SearchResult {
     }
 }
 
-impl<T: Scalar> SpannIndex<T> {
+impl<T: Scalar, M> SpannIndex<T, M> {
     /// Returns the vector dimension this index was built for.
     pub fn dimension(&self) -> usize {
         self.dimension
@@ -530,85 +548,18 @@ impl<T: Scalar> SpannIndex<T> {
         self.epsilon_closure
     }
 
-    /// Initialize index with raw data and number of centroids (k).
-    /// Uses a simplified K-Means for centroid selection.
-    pub fn build(
-        dimension: usize,
-        raw_data: Vec<Vector<T>>,
-        k_centroids: usize,
-        epsilon_closure: f32,
-    ) -> Result<Self, String> {
-        Self::build_with_store(
-            dimension,
-            raw_data,
-            k_centroids,
-            epsilon_closure,
-            DataStore::from_vectors,
-        )
-    }
-
-    /// Initialize index with raw data and number of centroids (k),
-    /// while customizing how many vectors are stored per batch file.
-    pub fn build_with_vectors_per_file(
-        dimension: usize,
-        raw_data: Vec<Vector<T>>,
-        k_centroids: usize,
-        epsilon_closure: f32,
-        vectors_per_file: usize,
-    ) -> Result<Self, String> {
-        Self::build_with_store(
-            dimension,
-            raw_data,
-            k_centroids,
-            epsilon_closure,
-            move |dim, data| DataStore::from_vectors_with_batch(dim, data, vectors_per_file),
-        )
-    }
-
-    /// Initialize index with raw data and number of centroids (k),
-    /// while specifying where the on-disk store should live.
-    pub fn build_with_store_dir(
-        dimension: usize,
-        raw_data: Vec<Vector<T>>,
-        k_centroids: usize,
-        epsilon_closure: f32,
-        store_dir: impl AsRef<Path>,
-    ) -> Result<Self, String> {
-        let store_dir = store_dir.as_ref().to_path_buf();
-        Self::build_with_store(
-            dimension,
-            raw_data,
-            k_centroids,
-            epsilon_closure,
-            move |dim, data| DataStore::from_vectors_in_dir(dim, data, &store_dir),
-        )
-    }
-
-    /// Initialize index with raw data and number of centroids (k),
-    /// while specifying where the on-disk store should live and the batch size.
-    pub fn build_with_store_dir_and_batch(
-        dimension: usize,
-        raw_data: Vec<Vector<T>>,
-        k_centroids: usize,
-        epsilon_closure: f32,
-        store_dir: impl AsRef<Path>,
-        vectors_per_file: usize,
-    ) -> Result<Self, String> {
-        let store_dir = store_dir.as_ref().to_path_buf();
-        Self::build_with_store(
-            dimension,
-            raw_data,
-            k_centroids,
-            epsilon_closure,
-            move |dim, data| {
-                DataStore::from_vectors_in_dir_with_batch(dim, data, &store_dir, vectors_per_file)
-            },
-        )
+    /// Returns metadata for a vector ID, if it exists.
+    pub fn metadata(&self, id: usize) -> Option<&M> {
+        self.metadata.get(id)
     }
 
     /// Adds a new vector to the store and assigns it to posting lists.
     /// Centroids are kept fixed, so this is a lightweight incremental path.
-    pub fn add_vector(&mut self, vector: Vector<T>) -> Result<usize, String> {
+    pub fn add_vector_with_metadata(
+        &mut self,
+        vector: Vector<T>,
+        metadata: M,
+    ) -> Result<usize, String> {
         if vector.len() != self.dimension {
             return Err(format!(
                 "Vector has dimension {}, expected {}",
@@ -637,12 +588,98 @@ impl<T: Scalar> SpannIndex<T> {
             }
         }
 
+        self.metadata.push(metadata);
         Ok(vid.0)
+    }
+
+    /// Initialize index with raw data, metadata, and number of centroids (k).
+    /// Uses a simplified K-Means for centroid selection.
+    pub fn build_with_metadata(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        metadata: Vec<M>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+    ) -> Result<Self, String> {
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            DataStore::from_vectors,
+        )
+    }
+
+    /// Initialize index with raw data, metadata, and number of centroids (k),
+    /// while customizing how many vectors are stored per batch file.
+    pub fn build_with_metadata_and_vectors_per_file(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        metadata: Vec<M>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            move |dim, data| DataStore::from_vectors_with_batch(dim, data, vectors_per_file),
+        )
+    }
+
+    /// Initialize index with raw data, metadata, and number of centroids (k),
+    /// while specifying where the on-disk store should live.
+    pub fn build_with_metadata_and_store_dir(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        metadata: Vec<M>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        store_dir: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        let store_dir = store_dir.as_ref().to_path_buf();
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            move |dim, data| DataStore::from_vectors_in_dir(dim, data, &store_dir),
+        )
+    }
+
+    /// Initialize index with raw data, metadata, and number of centroids (k),
+    /// while specifying where the on-disk store should live and the batch size.
+    pub fn build_with_metadata_and_store_dir_and_batch(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        metadata: Vec<M>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        store_dir: impl AsRef<Path>,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        let store_dir = store_dir.as_ref().to_path_buf();
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            move |dim, data| {
+                DataStore::from_vectors_in_dir_with_batch(dim, data, &store_dir, vectors_per_file)
+            },
+        )
     }
 
     fn build_with_store<F>(
         dimension: usize,
         raw_data: Vec<Vector<T>>,
+        metadata: Vec<M>,
         k_centroids: usize,
         epsilon_closure: f32,
         store_builder: F,
@@ -652,6 +689,13 @@ impl<T: Scalar> SpannIndex<T> {
     {
         if raw_data.is_empty() {
             return Err("Cannot build index with empty data".to_string());
+        }
+        if metadata.len() != raw_data.len() {
+            return Err(format!(
+                "Metadata has {} entries but {} vectors were provided",
+                metadata.len(),
+                raw_data.len()
+            ));
         }
 
         let mut centroids: Vec<Vector<T>> = raw_data.iter().take(k_centroids).cloned().collect();
@@ -718,6 +762,7 @@ impl<T: Scalar> SpannIndex<T> {
             dimension,
             posting_lists,
             store,
+            metadata,
             epsilon_closure,
         })
     }
@@ -817,6 +862,107 @@ impl<T: Scalar> SpannIndex<T> {
         // Reverse to get Best (Smallest Dist) -> Worst
         results.reverse();
         results
+    }
+
+    /// Search the index and return metadata aligned with each result.
+    pub fn search_with_metadata<'a>(
+        &'a self,
+        query: &Vector<T>,
+        k: usize,
+        rng_factor: f32,
+    ) -> Vec<(usize, f32, &'a M)> {
+        self.search(query, k, rng_factor)
+            .into_iter()
+            .map(|(id, dist)| {
+                let meta = self
+                    .metadata
+                    .get(id)
+                    .expect("Missing metadata for vector id");
+                (id, dist, meta)
+            })
+            .collect()
+    }
+}
+
+impl<T: Scalar> SpannIndex<T, ()> {
+    /// Initialize index with raw data and number of centroids (k).
+    /// Uses a simplified K-Means for centroid selection.
+    pub fn build(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+    ) -> Result<Self, String> {
+        let metadata = vec![(); raw_data.len()];
+        Self::build_with_metadata(dimension, raw_data, metadata, k_centroids, epsilon_closure)
+    }
+
+    /// Initialize index with raw data and number of centroids (k),
+    /// while customizing how many vectors are stored per batch file.
+    pub fn build_with_vectors_per_file(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        let metadata = vec![(); raw_data.len()];
+        Self::build_with_metadata_and_vectors_per_file(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            vectors_per_file,
+        )
+    }
+
+    /// Initialize index with raw data and number of centroids (k),
+    /// while specifying where the on-disk store should live.
+    pub fn build_with_store_dir(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        store_dir: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        let metadata = vec![(); raw_data.len()];
+        Self::build_with_metadata_and_store_dir(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+        )
+    }
+
+    /// Initialize index with raw data and number of centroids (k),
+    /// while specifying where the on-disk store should live and the batch size.
+    pub fn build_with_store_dir_and_batch(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        store_dir: impl AsRef<Path>,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        let metadata = vec![(); raw_data.len()];
+        Self::build_with_metadata_and_store_dir_and_batch(
+            dimension,
+            raw_data,
+            metadata,
+            k_centroids,
+            epsilon_closure,
+            store_dir,
+            vectors_per_file,
+        )
+    }
+
+    /// Adds a new vector to the store and assigns it to posting lists.
+    /// Centroids are kept fixed, so this is a lightweight incremental path.
+    pub fn add_vector(&mut self, vector: Vector<T>) -> Result<usize, String> {
+        self.add_vector_with_metadata(vector, ())
     }
 }
 

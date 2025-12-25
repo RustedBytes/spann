@@ -58,6 +58,38 @@ let results = index.search(&query, k, rng_factor);
 
 `results` contains `(vector_id, squared_distance)` pairs ordered from nearest to farthest.
 
+### Metadata
+
+Attach metadata to each vector and retrieve it alongside query results:
+
+```rust
+use ndarray::Array1;
+use spann::SpannIndex;
+
+let dimension = 128;
+let data: Vec<Array1<f32>> = /* your vectors */;
+let metadata: Vec<String> = /* same length as data */;
+
+let k_centroids = 64;
+let epsilon_closure = 0.2;
+let index = SpannIndex::<f32, String>::build_with_metadata(
+    dimension,
+    data,
+    metadata,
+    k_centroids,
+    epsilon_closure,
+)?;
+
+let query: Array1<f32> = /* query vector */;
+let k = 10;
+let rng_factor = 0.1;
+let results = index.search_with_metadata(&query, k, rng_factor);
+for (id, dist, meta) in results {
+    println!("{id} {dist} {meta}");
+}
+```
+Metadata is kept aligned with vector IDs; you can also call `index.metadata(id)`.
+
 ## How it works (at a high level)
 
 1. **Build**

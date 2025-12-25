@@ -1,5 +1,5 @@
-use ndarray::Array1;
 use half::f16;
+use ndarray::Array1;
 
 fn main() {
     let dimension = 128;
@@ -34,6 +34,10 @@ fn main() {
         data.push(Array1::from(vec));
     }
 
+    let metadata: Vec<usize> = (0..data.len()).collect();
+    let mut data = Some(data);
+    let mut metadata = Some(metadata);
+
     let k_centroids = 2;
     let epsilon_closure = 0.15;
 
@@ -51,29 +55,42 @@ fn main() {
     };
 
     let index = match (store_dir, vectors_per_file) {
-        (Some(dir), Some(vectors_per_file)) => spann::SpannIndex::<f16>::build_with_store_dir_and_batch(
+        (Some(dir), Some(vectors_per_file)) => {
+            spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir_and_batch(
+                dimension,
+                data.take().expect("Data already moved"),
+                metadata.take().expect("Metadata already moved"),
+                k_centroids,
+                epsilon_closure,
+                dir,
+                vectors_per_file,
+            )
+        }
+        (Some(dir), None) => spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir(
             dimension,
-            data,
+            data.take().expect("Data already moved"),
+            metadata.take().expect("Metadata already moved"),
             k_centroids,
             epsilon_closure,
             dir,
-            vectors_per_file,
         ),
-        (Some(dir), None) => spann::SpannIndex::<f16>::build_with_store_dir(
+        (None, Some(vectors_per_file)) => {
+            spann::SpannIndex::<f16, usize>::build_with_metadata_and_vectors_per_file(
+                dimension,
+                data.take().expect("Data already moved"),
+                metadata.take().expect("Metadata already moved"),
+                k_centroids,
+                epsilon_closure,
+                vectors_per_file,
+            )
+        }
+        (None, None) => spann::SpannIndex::<f16, usize>::build_with_metadata(
             dimension,
-            data,
+            data.take().expect("Data already moved"),
+            metadata.take().expect("Metadata already moved"),
             k_centroids,
             epsilon_closure,
-            dir,
         ),
-        (None, Some(vectors_per_file)) => spann::SpannIndex::<f16>::build_with_vectors_per_file(
-            dimension,
-            data,
-            k_centroids,
-            epsilon_closure,
-            vectors_per_file,
-        ),
-        (None, None) => spann::SpannIndex::<f16>::build(dimension, data, k_centroids, epsilon_closure),
     };
     let index = match index {
         Ok(index) => index,
@@ -95,11 +112,11 @@ fn main() {
     let k = 3;
     let rng_factor = 0.1;
 
-    let results = index.search(&query, k, rng_factor);
+    let results = index.search_with_metadata(&query, k, rng_factor);
 
     println!("Query: {:?}", query);
-    println!("Top {k} results (index, squared_distance):");
-    for (id, dist) in results {
-        println!("  {id}: {dist:.4}");
+    println!("Top {k} results (index, squared_distance, metadata):");
+    for (id, dist, meta) in results {
+        println!("  {id}: {dist:.4} (meta {meta})");
     }
 }
