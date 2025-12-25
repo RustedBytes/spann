@@ -2,30 +2,38 @@ use ndarray::Array1;
 use half::f16;
 
 fn main() {
+    let dimension = 128;
     // Larger demo data set: two clusters of 3D vectors.
     let mut data: Vec<Array1<f16>> = Vec::new();
-    for i in 0..2_000_000 {
+    for i in 0..500_000 {
         let i_f32 = i as f32;
         let t = i_f32 * 0.01;
         let mod_component = (i % 10) as f32 * 0.02;
-        data.push(Array1::from(vec![
-            f16::from_f32(1.0 + t),
-            f16::from_f32(1.0 - t * 0.5),
-            f16::from_f32(1.0 + mod_component),
-        ]));
+        let mut vec = Vec::with_capacity(dimension);
+        vec.push(f16::from_f32(1.0 + t));
+        vec.push(f16::from_f32(1.0 - t * 0.5));
+        vec.push(f16::from_f32(1.0 + mod_component));
+        for j in 3..dimension {
+            let j_f32 = j as f32;
+            vec.push(f16::from_f32(1.0 + mod_component + j_f32 * 0.001));
+        }
+        data.push(Array1::from(vec));
     }
-    for i in 0..2_000_000 {
+    for i in 0..500_000 {
         let i_f32 = i as f32;
         let t = i_f32 * 0.01;
         let mod_component = (i % 12) as f32 * 0.015;
-        data.push(Array1::from(vec![
-            f16::from_f32(5.0 - t * 0.4),
-            f16::from_f32(5.0 + t * 0.3),
-            f16::from_f32(5.0 - mod_component),
-        ]));
+        let mut vec = Vec::with_capacity(dimension);
+        vec.push(f16::from_f32(5.0 - t * 0.4));
+        vec.push(f16::from_f32(5.0 + t * 0.3));
+        vec.push(f16::from_f32(5.0 - mod_component));
+        for j in 3..dimension {
+            let j_f32 = j as f32;
+            vec.push(f16::from_f32(5.0 - mod_component - j_f32 * 0.001));
+        }
+        data.push(Array1::from(vec));
     }
 
-    let dimension = 3;
     let k_centroids = 2;
     let epsilon_closure = 0.15;
 
@@ -48,11 +56,15 @@ fn main() {
         }
     };
 
-    let query = Array1::from(vec![
-        f16::from_f32(1.0),
-        f16::from_f32(1.0),
-        f16::from_f32(1.2),
-    ]);
+    let mut query_vec = Vec::with_capacity(dimension);
+    query_vec.push(f16::from_f32(1.0));
+    query_vec.push(f16::from_f32(1.0));
+    query_vec.push(f16::from_f32(1.2));
+    for j in 3..dimension {
+        let j_f32 = j as f32;
+        query_vec.push(f16::from_f32(1.0 + j_f32 * 0.001));
+    }
+    let query = Array1::from(query_vec);
     let k = 3;
     let rng_factor = 0.1;
 
