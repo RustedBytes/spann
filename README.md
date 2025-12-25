@@ -1,5 +1,7 @@
 # spann
 
+[![Crates.io Version](https://img.shields.io/crates/v/spann)](https://crates.io/crates/spann)
+
 A proof-of-concept implementation of a SPANN-style approximate nearest neighbor index in Rust.
 This project focuses on a readable, hackable baseline that still exercises core SPANN ideas:
 coarse centroids, soft assignment (epsilon closure), and a simple on-disk vector store.
