@@ -1,6 +1,6 @@
 [package]
 name = "spann"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Proof-of-concept SPANN-style approximate nearest neighbor index in Rust."
 license = "MIT"
