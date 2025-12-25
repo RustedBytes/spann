@@ -84,4 +84,4 @@ let results = index.search(&query, k, rng_factor);
 
 ## License
 
-No license specified yet.
+UNLICENSED.
