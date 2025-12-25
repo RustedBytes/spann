@@ -1,9 +1,134 @@
+use clap::{Parser, Subcommand};
 use half::f16;
 use ndarray::Array1;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "spann-demo", about = "SPANN proof-of-concept CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Create {
+        /// Path to write the index file.
+        index_path: PathBuf,
+        /// Directory where vector batches are stored.
+        #[arg(long)]
+        store_dir: Option<PathBuf>,
+        /// Override batch size for on-disk vector storage.
+        #[arg(long)]
+        vectors_per_file: Option<usize>,
+    },
+    Query {
+        /// Path to an existing index file.
+        index_path: PathBuf,
+        /// Number of neighbors to return.
+        #[arg(long, default_value_t = 3)]
+        k: usize,
+        /// Pruning factor for centroid selection.
+        #[arg(long, default_value_t = 0.1)]
+        rng_factor: f32,
+    },
+}
+
+const DIMENSION: usize = 128;
+const K_CENTROIDS: usize = 2;
+const EPSILON_CLOSURE: f32 = 0.15;
 
 fn main() {
-    let dimension = 128;
-    // Larger demo data set: two clusters of 3D vectors.
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Create {
+            index_path,
+            store_dir,
+            vectors_per_file,
+        } => {
+            let store_dir = store_dir.unwrap_or_else(|| {
+                index_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join("store")
+            });
+            if let Err(err) = create_index(index_path, store_dir, vectors_per_file) {
+                eprintln!("{err}");
+            }
+        }
+        Commands::Query {
+            index_path,
+            k,
+            rng_factor,
+        } => {
+            if let Err(err) = query_index(index_path, k, rng_factor) {
+                eprintln!("{err}");
+            }
+        }
+    }
+}
+
+fn create_index(
+    index_path: PathBuf,
+    store_dir: PathBuf,
+    vectors_per_file: Option<usize>,
+) -> Result<(), String> {
+    let data = build_demo_vectors(DIMENSION);
+    let metadata: Vec<usize> = (0..data.len()).collect();
+
+    let index = match vectors_per_file {
+        Some(vectors_per_file) => {
+            spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir_and_batch(
+                DIMENSION,
+                data,
+                metadata,
+                K_CENTROIDS,
+                EPSILON_CLOSURE,
+                &store_dir,
+                vectors_per_file,
+            )
+        }
+        None => spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir(
+            DIMENSION,
+            data,
+            metadata,
+            K_CENTROIDS,
+            EPSILON_CLOSURE,
+            &store_dir,
+        ),
+    }
+    .map_err(|err| format!("Failed to build index: {err}"))?;
+
+    index
+        .save_to_path(&index_path)
+        .map_err(|err| format!("Failed to save index: {err}"))?;
+
+    println!(
+        "Index saved to {} (vector store at {}).",
+        index_path.display(),
+        store_dir.display()
+    );
+    Ok(())
+}
+
+fn query_index(index_path: PathBuf, k: usize, rng_factor: f32) -> Result<(), String> {
+    let index = spann::SpannIndex::<f16, usize>::load_from_path(&index_path)
+        .map_err(|err| format!("Failed to load index {}: {err}", index_path.display()))?;
+
+    let query = build_query_vector(index.dimension());
+    let results = index.search_with_metadata(&query, k, rng_factor);
+
+    println!("Query: {:?}", query);
+    println!("Top {k} results (index, squared_distance, metadata):");
+    for (id, dist, meta) in results {
+        println!("  {id}: {dist:.4} (meta {meta})");
+    }
+
+    Ok(())
+}
+
+fn build_demo_vectors(dimension: usize) -> Vec<Array1<f16>> {
     let mut data: Vec<Array1<f16>> = Vec::new();
     for i in 0..500_000 {
         let i_f32 = i as f32;
@@ -33,73 +158,10 @@ fn main() {
         }
         data.push(Array1::from(vec));
     }
+    data
+}
 
-    let metadata: Vec<usize> = (0..data.len()).collect();
-    let mut data = Some(data);
-    let mut metadata = Some(metadata);
-
-    let k_centroids = 2;
-    let epsilon_closure = 0.15;
-
-    let mut args = std::env::args().skip(1);
-    let store_dir = args.next();
-    let vectors_per_file = match args.next() {
-        Some(value) => match value.parse::<usize>() {
-            Ok(v) => Some(v),
-            Err(_) => {
-                eprintln!("Invalid vectors_per_file value: {value}");
-                return;
-            }
-        },
-        None => None,
-    };
-
-    let index = match (store_dir, vectors_per_file) {
-        (Some(dir), Some(vectors_per_file)) => {
-            spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir_and_batch(
-                dimension,
-                data.take().expect("Data already moved"),
-                metadata.take().expect("Metadata already moved"),
-                k_centroids,
-                epsilon_closure,
-                dir,
-                vectors_per_file,
-            )
-        }
-        (Some(dir), None) => spann::SpannIndex::<f16, usize>::build_with_metadata_and_store_dir(
-            dimension,
-            data.take().expect("Data already moved"),
-            metadata.take().expect("Metadata already moved"),
-            k_centroids,
-            epsilon_closure,
-            dir,
-        ),
-        (None, Some(vectors_per_file)) => {
-            spann::SpannIndex::<f16, usize>::build_with_metadata_and_vectors_per_file(
-                dimension,
-                data.take().expect("Data already moved"),
-                metadata.take().expect("Metadata already moved"),
-                k_centroids,
-                epsilon_closure,
-                vectors_per_file,
-            )
-        }
-        (None, None) => spann::SpannIndex::<f16, usize>::build_with_metadata(
-            dimension,
-            data.take().expect("Data already moved"),
-            metadata.take().expect("Metadata already moved"),
-            k_centroids,
-            epsilon_closure,
-        ),
-    };
-    let index = match index {
-        Ok(index) => index,
-        Err(err) => {
-            eprintln!("Failed to build index: {err}");
-            return;
-        }
-    };
-
+fn build_query_vector(dimension: usize) -> Array1<f16> {
     let mut query_vec = Vec::with_capacity(dimension);
     query_vec.push(f16::from_f32(1.0));
     query_vec.push(f16::from_f32(1.0));
@@ -108,15 +170,5 @@ fn main() {
         let j_f32 = j as f32;
         query_vec.push(f16::from_f32(1.0 + j_f32 * 0.001));
     }
-    let query = Array1::from(query_vec);
-    let k = 3;
-    let rng_factor = 0.1;
-
-    let results = index.search_with_metadata(&query, k, rng_factor);
-
-    println!("Query: {:?}", query);
-    println!("Top {k} results (index, squared_distance, metadata):");
-    for (id, dist, meta) in results {
-        println!("  {id}: {dist:.4} (meta {meta})");
-    }
+    Array1::from(query_vec)
 }

@@ -232,6 +232,46 @@ impl<T: Scalar> DataStore<T> {
         })
     }
 
+    fn open_from_vectors_dir(
+        dimension: usize,
+        vectors_dir: impl AsRef<Path>,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        if dimension == 0 {
+            return Err("Vector dimension must be > 0".to_string());
+        }
+        Self::validate_vectors_per_file(vectors_per_file)?;
+
+        let dir = vectors_dir.as_ref().to_path_buf();
+        if !dir.is_dir() {
+            return Err(format!(
+                "Vector store directory {} does not exist",
+                dir.display()
+            ));
+        }
+
+        let record_len = dimension
+            .checked_mul(T::BYTE_SIZE)
+            .ok_or_else(|| "Vector dimension is too large".to_string())?;
+        let batch_ids = Self::list_batch_ids(&dir)?;
+        if batch_ids.is_empty() {
+            return Err(format!(
+                "Vector store directory {} has no batch files",
+                dir.display()
+            ));
+        }
+        let count = Self::count_vectors_in_batches(&dir, &batch_ids, record_len, vectors_per_file)?;
+
+        Ok(Self {
+            dir,
+            dimension,
+            count,
+            vectors_per_file,
+            cleanup_on_drop: false,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
     fn get(&self, id: VectorId) -> Vector<T> {
         assert!(
             id.0 < self.count,
@@ -964,6 +1004,223 @@ impl<T: Scalar> SpannIndex<T, ()> {
     pub fn add_vector(&mut self, vector: Vector<T>) -> Result<usize, String> {
         self.add_vector_with_metadata(vector, ())
     }
+}
+
+impl<T: Scalar> SpannIndex<T, usize> {
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let mut file = File::create(path.as_ref()).map_err(|err| {
+            format!(
+                "Failed to create index file {}: {err}",
+                path.as_ref().display()
+            )
+        })?;
+
+        write_exact(&mut file, INDEX_MAGIC)?;
+        write_u32(&mut file, INDEX_VERSION)?;
+        write_string(&mut file, T::FILE_TAG)?;
+        write_u64(&mut file, self.dimension as u64)?;
+        write_f32(&mut file, self.epsilon_closure)?;
+        write_u64(&mut file, self.store.vectors_per_file as u64)?;
+        write_u64(&mut file, self.store.count as u64)?;
+        let store_dir = std::fs::canonicalize(&self.store.dir).unwrap_or(self.store.dir.clone());
+        write_string(&mut file, &store_dir.to_string_lossy())?;
+        write_u64(&mut file, self.posting_lists.len() as u64)?;
+
+        for list in &self.posting_lists {
+            for &value in &list.centroid {
+                let bytes = value.to_le_bytes();
+                write_exact(&mut file, &bytes)?;
+            }
+
+            write_u64(&mut file, list.members.len() as u64)?;
+            for id in &list.members {
+                write_u64(&mut file, id.0 as u64)?;
+            }
+        }
+
+        write_u64(&mut file, self.metadata.len() as u64)?;
+        for &meta in &self.metadata {
+            write_u64(&mut file, meta as u64)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let mut file = File::open(path)
+            .map_err(|err| format!("Failed to open index file {}: {err}", path.display()))?;
+
+        let mut magic = [0u8; INDEX_MAGIC.len()];
+        read_exact(&mut file, &mut magic)?;
+        if &magic != INDEX_MAGIC {
+            return Err(format!(
+                "Index file {} has invalid magic bytes",
+                path.display()
+            ));
+        }
+
+        let version = read_u32(&mut file)?;
+        if version != INDEX_VERSION {
+            return Err(format!(
+                "Index file {} has unsupported version {}",
+                path.display(),
+                version
+            ));
+        }
+
+        let tag = read_string(&mut file)?;
+        if tag != T::FILE_TAG {
+            return Err(format!(
+                "Index file {} expects scalar type {}, got {}",
+                path.display(),
+                T::FILE_TAG,
+                tag
+            ));
+        }
+
+        let dimension = to_usize(read_u64(&mut file)?, "dimension")?;
+        let epsilon_closure = read_f32(&mut file)?;
+        let vectors_per_file = to_usize(read_u64(&mut file)?, "vectors_per_file")?;
+        let expected_count = to_usize(read_u64(&mut file)?, "expected_count")?;
+        let store_dir_raw = read_string(&mut file)?;
+        let store_dir = resolve_index_path(path, &store_dir_raw);
+
+        let posting_list_count = to_usize(read_u64(&mut file)?, "posting_list_count")?;
+        let mut posting_lists = Vec::with_capacity(posting_list_count);
+        for _ in 0..posting_list_count {
+            let mut centroid_values = Vec::with_capacity(dimension);
+            for _ in 0..dimension {
+                let mut buffer = vec![0u8; T::BYTE_SIZE];
+                read_exact(&mut file, &mut buffer)?;
+                centroid_values.push(T::from_le_bytes(&buffer));
+            }
+            let centroid = Array1::from(centroid_values);
+
+            let member_count = to_usize(read_u64(&mut file)?, "member_count")?;
+            let mut members = Vec::with_capacity(member_count);
+            for _ in 0..member_count {
+                let id = to_usize(read_u64(&mut file)?, "member_id")?;
+                members.push(VectorId(id));
+            }
+            posting_lists.push(PostingList { centroid, members });
+        }
+
+        let metadata_len = to_usize(read_u64(&mut file)?, "metadata_len")?;
+        let mut metadata = Vec::with_capacity(metadata_len);
+        for _ in 0..metadata_len {
+            let meta = to_usize(read_u64(&mut file)?, "metadata_value")?;
+            metadata.push(meta);
+        }
+
+        if metadata.len() != expected_count {
+            return Err(format!(
+                "Index file {} metadata count {} does not match expected {expected_count}",
+                path.display(),
+                metadata.len()
+            ));
+        }
+
+        for list in &posting_lists {
+            for id in &list.members {
+                if id.0 >= expected_count {
+                    return Err(format!(
+                        "Index file {} has member id {} out of bounds",
+                        path.display(),
+                        id.0
+                    ));
+                }
+            }
+        }
+
+        let store = DataStore::open_from_vectors_dir(dimension, store_dir, vectors_per_file)?;
+        if store.count != expected_count {
+            return Err(format!(
+                "Index file {} expects {expected_count} vectors, store has {}",
+                path.display(),
+                store.count
+            ));
+        }
+
+        Ok(Self {
+            dimension,
+            posting_lists,
+            store,
+            metadata,
+            epsilon_closure,
+        })
+    }
+}
+
+const INDEX_MAGIC: &[u8; 8] = b"SPANNIDX";
+const INDEX_VERSION: u32 = 1;
+
+fn write_exact(writer: &mut File, bytes: &[u8]) -> Result<(), String> {
+    writer
+        .write_all(bytes)
+        .map_err(|err| format!("Failed to write index data: {err}"))
+}
+
+fn read_exact(reader: &mut File, buffer: &mut [u8]) -> Result<(), String> {
+    reader
+        .read_exact(buffer)
+        .map_err(|err| format!("Failed to read index data: {err}"))
+}
+
+fn write_u32(writer: &mut File, value: u32) -> Result<(), String> {
+    write_exact(writer, &value.to_le_bytes())
+}
+
+fn read_u32(reader: &mut File) -> Result<u32, String> {
+    let mut buffer = [0u8; 4];
+    read_exact(reader, &mut buffer)?;
+    Ok(u32::from_le_bytes(buffer))
+}
+
+fn write_u64(writer: &mut File, value: u64) -> Result<(), String> {
+    write_exact(writer, &value.to_le_bytes())
+}
+
+fn read_u64(reader: &mut File) -> Result<u64, String> {
+    let mut buffer = [0u8; 8];
+    read_exact(reader, &mut buffer)?;
+    Ok(u64::from_le_bytes(buffer))
+}
+
+fn write_f32(writer: &mut File, value: f32) -> Result<(), String> {
+    write_exact(writer, &value.to_le_bytes())
+}
+
+fn read_f32(reader: &mut File) -> Result<f32, String> {
+    let mut buffer = [0u8; 4];
+    read_exact(reader, &mut buffer)?;
+    Ok(f32::from_le_bytes(buffer))
+}
+
+fn write_string(writer: &mut File, value: &str) -> Result<(), String> {
+    write_u64(writer, value.len() as u64)?;
+    write_exact(writer, value.as_bytes())
+}
+
+fn read_string(reader: &mut File) -> Result<String, String> {
+    let len = read_u64(reader)? as usize;
+    let mut buffer = vec![0u8; len];
+    read_exact(reader, &mut buffer)?;
+    String::from_utf8(buffer).map_err(|err| format!("Invalid UTF-8 in index file: {err}"))
+}
+
+fn resolve_index_path(index_path: &Path, stored: &str) -> PathBuf {
+    let stored_path = PathBuf::from(stored);
+    if stored_path.is_relative() {
+        let base = index_path.parent().unwrap_or_else(|| Path::new("."));
+        base.join(stored_path)
+    } else {
+        stored_path
+    }
+}
+
+fn to_usize(value: u64, label: &str) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("Index field {label} is too large"))
 }
 
 /// Computes Squared Euclidean Distance to avoid expensive SQRT operations during comparison.

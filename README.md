@@ -14,26 +14,27 @@ coarse centroids, soft assignment (epsilon closure), and a simple on-disk vector
 
 ## Quick start
 
-Build and run the demo with the default temp-backed store:
+Create an index file and its on-disk vector store:
 
 ```bash
-cargo run --release
+cargo run --release -- create /path/to/index.bin --store-dir /path/to/store
 ```
 
-Persist the vector store into a directory:
+Optionally pass `vectors_per_file` to control batch size:
 
 ```bash
-cargo run --release -- /path/to/store_dir
+cargo run --release -- create /path/to/index.bin --store-dir /path/to/store --vectors-per-file 2048
 ```
 
-Optionally pass `vectors_per_file` as a second argument to control batch size:
+Query an existing index file:
 
 ```bash
-cargo run --release -- /path/to/store_dir 2048
+cargo run --release -- query /path/to/index.bin --k 3 --rng-factor 0.1
 ```
 
 The demo in `src/main.rs` generates 1,000,000 `f16` vectors of dimension 128 (two clusters),
-builds the index with `k=2` centroids and `epsilon=0.15`, and runs a `k=3` query against it.
+builds the index with `k=2` centroids and `epsilon=0.15`, writes the index metadata to the
+requested index file, and serves queries by loading that file.
 
 ## Library usage
 
