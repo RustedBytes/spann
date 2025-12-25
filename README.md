@@ -119,4 +119,8 @@ Metadata is kept aligned with vector IDs; you can also call `index.metadata(id)`
 
 ## License
 
-UNLICENSED.
+MIT.
+
+## Author
+
+Yehor Smoliakov
