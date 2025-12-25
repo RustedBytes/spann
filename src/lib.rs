@@ -1231,7 +1231,7 @@ fn squared_euclidean<T: Scalar>(a: &Vector<T>, b: &Vector<T>) -> f32 {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-unsafe fn squared_euclidean_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn squared_euclidean_f32_avx2(a: &[f32], b: &[f32]) -> f32 { unsafe {
     let mut acc = arch::_mm256_setzero_ps();
     let mut i = 0;
     let len = a.len();
@@ -1255,11 +1255,11 @@ unsafe fn squared_euclidean_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     }
 
     total
-}
+}}
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "sse2")]
-unsafe fn squared_euclidean_f32_sse2(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn squared_euclidean_f32_sse2(a: &[f32], b: &[f32]) -> f32 { unsafe {
     let mut acc = arch::_mm_setzero_ps();
     let mut i = 0;
     let len = a.len();
@@ -1283,4 +1283,4 @@ unsafe fn squared_euclidean_f32_sse2(a: &[f32], b: &[f32]) -> f32 {
     }
 
     total
-}
+}}
