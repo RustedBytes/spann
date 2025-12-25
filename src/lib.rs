@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::{File, OpenOptions};
@@ -103,42 +102,53 @@ impl Scalar for f16 {
 struct VectorId(usize);
 
 /// A simplified representation of the "Disk" storage.
-/// This version writes vectors to a file and reads them by offset.
+/// This version writes vectors into batch files and reads on demand.
 struct DataStore<T: Scalar> {
-    file: RefCell<File>,
+    dir: PathBuf,
     dimension: usize,
     count: usize,
-    path: PathBuf,
+    vectors_per_file: usize,
     cleanup_on_drop: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: Scalar> DataStore<T> {
-    fn from_vectors(dimension: usize, vectors: &[Vector<T>]) -> Result<Self, String> {
-        Self::validate_vectors(dimension, vectors)?;
+    const DEFAULT_VECTORS_PER_FILE: usize = 4096;
 
-        let mut path = std::env::temp_dir();
+    fn from_vectors(dimension: usize, vectors: &[Vector<T>]) -> Result<Self, String> {
+        Self::from_vectors_with_batch(dimension, vectors, Self::DEFAULT_VECTORS_PER_FILE)
+    }
+
+    fn from_vectors_with_batch(
+        dimension: usize,
+        vectors: &[Vector<T>],
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        Self::validate_vectors(dimension, vectors)?;
+        Self::validate_vectors_per_file(vectors_per_file)?;
+
+        let mut dir = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let pid = std::process::id();
-        path.push(format!("spann_store_{pid}_{nanos}.bin"));
+        dir.push(format!("spann_store_{pid}_{nanos}_vectors_{}", T::FILE_TAG));
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|err| format!("Failed to create data store file: {err}"))?;
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            format!(
+                "Failed to create temporary data store directory {}: {err}",
+                dir.display()
+            )
+        })?;
 
-        Self::write_vectors(&mut file, vectors)?;
+        Self::write_vectors(&dir, vectors, vectors_per_file)?;
 
         Ok(Self {
-            file: RefCell::new(file),
+            dir,
             dimension,
             count: vectors.len(),
-            path,
+            vectors_per_file,
             cleanup_on_drop: true,
             _marker: std::marker::PhantomData,
         })
@@ -149,7 +159,22 @@ impl<T: Scalar> DataStore<T> {
         vectors: &[Vector<T>],
         base_dir: &Path,
     ) -> Result<Self, String> {
+        Self::from_vectors_in_dir_with_batch(
+            dimension,
+            vectors,
+            base_dir,
+            Self::DEFAULT_VECTORS_PER_FILE,
+        )
+    }
+
+    fn from_vectors_in_dir_with_batch(
+        dimension: usize,
+        vectors: &[Vector<T>],
+        base_dir: &Path,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
         Self::validate_vectors(dimension, vectors)?;
+        Self::validate_vectors_per_file(vectors_per_file)?;
 
         std::fs::create_dir_all(base_dir).map_err(|err| {
             format!(
@@ -158,27 +183,22 @@ impl<T: Scalar> DataStore<T> {
             )
         })?;
 
-        let path = base_dir.join(format!("vectors_{}.bin", T::FILE_TAG));
+        let dir = base_dir.join(format!("vectors_{}", T::FILE_TAG));
         let record_len = dimension
             .checked_mul(T::BYTE_SIZE)
             .ok_or_else(|| "Vector dimension is too large".to_string())?;
 
-        if path.exists() {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|err| format!("Failed to open data store file: {err}"))?;
-            let file_len = file
-                .metadata()
-                .map_err(|err| format!("Failed to read data store metadata: {err}"))?
-                .len() as usize;
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            format!(
+                "Failed to create data store directory {}: {err}",
+                dir.display()
+            )
+        })?;
 
-            if record_len == 0 || !file_len.is_multiple_of(record_len) {
-                return Err("Data store file size does not match dimension".to_string());
-            }
-
-            let count = file_len / record_len;
+        let existing_batches = Self::list_batch_ids(&dir)?;
+        if !existing_batches.is_empty() {
+            let count =
+                Self::count_vectors_in_batches(&dir, &existing_batches, record_len, vectors_per_file)?;
             if count != vectors.len() {
                 return Err(format!(
                     "Data store has {count} vectors but {expected} were provided",
@@ -187,29 +207,22 @@ impl<T: Scalar> DataStore<T> {
             }
 
             return Ok(Self {
-                file: RefCell::new(file),
+                dir,
                 dimension,
                 count,
-                path,
+                vectors_per_file,
                 cleanup_on_drop: false,
                 _marker: std::marker::PhantomData,
             });
         }
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|err| format!("Failed to create data store file: {err}"))?;
-
-        Self::write_vectors(&mut file, vectors)?;
+        Self::write_vectors(&dir, vectors, vectors_per_file)?;
 
         Ok(Self {
-            file: RefCell::new(file),
+            dir,
             dimension,
             count: vectors.len(),
-            path,
+            vectors_per_file,
             cleanup_on_drop: false,
             _marker: std::marker::PhantomData,
         })
@@ -223,17 +236,23 @@ impl<T: Scalar> DataStore<T> {
             self.count
         );
 
-        let record_len = self.dimension * T::BYTE_SIZE;
-        let offset = id.0 as u64 * record_len as u64;
-        let mut file = self.file.borrow_mut();
+        let record_len = self.record_len();
+        let batch_id = id.0 / self.vectors_per_file;
+        let offset = (id.0 % self.vectors_per_file) * record_len;
+        let path = self.batch_path(batch_id);
+        let mut file = File::open(&path)
+            .unwrap_or_else(|err| panic!("Failed to open batch file {}: {err}", path.display()));
 
-        if let Err(err) = file.seek(SeekFrom::Start(offset)) {
-            panic!("Failed to seek to vector {id:?}: {err}");
+        if let Err(err) = file.seek(SeekFrom::Start(offset as u64)) {
+            panic!("Failed to seek to vector {id:?} in {}: {err}", path.display());
         }
 
         let mut buffer = vec![0u8; record_len];
         if let Err(err) = file.read_exact(&mut buffer) {
-            panic!("Failed to read vector {id:?}: {err}");
+            panic!(
+                "Failed to read vector {id:?} from {}: {err}",
+                path.display()
+            );
         }
 
         let mut values = Vec::with_capacity(self.dimension);
@@ -260,25 +279,196 @@ impl<T: Scalar> DataStore<T> {
         Ok(())
     }
 
-    fn write_vectors(file: &mut File, vectors: &[Vector<T>]) -> Result<(), String> {
-        for vector in vectors {
-            for &value in vector {
-                let bytes = value.to_le_bytes();
-                file.write_all(&bytes)
-                    .map_err(|err| format!("Failed to write vector data: {err}"))?;
+    fn validate_vectors_per_file(vectors_per_file: usize) -> Result<(), String> {
+        if vectors_per_file == 0 {
+            return Err("vectors_per_file must be > 0".to_string());
+        }
+        Ok(())
+    }
+
+    fn append_vector(&mut self, vector: &Vector<T>) -> Result<VectorId, String> {
+        self.validate_vector(vector)?;
+        let id = self.count;
+        let record_len = self.record_len();
+        let batch_id = id / self.vectors_per_file;
+        let offset = (id % self.vectors_per_file) * record_len;
+        let path = self.batch_path(batch_id);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .map_err(|err| format!("Failed to open batch file {}: {err}", path.display()))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("Failed to read {} metadata: {err}", path.display()))?
+            .len() as usize;
+        if file_len != offset {
+            return Err(format!(
+                "Batch file {} size {file_len} does not match expected {offset}",
+                path.display()
+            ));
+        }
+        if let Err(err) = file.seek(SeekFrom::Start(offset as u64)) {
+            return Err(format!(
+                "Failed to seek to offset {offset} in {}: {err}",
+                path.display()
+            ));
+        }
+        Self::write_vector_to_file(&mut file, vector)?;
+        file.flush()
+            .map_err(|err| format!("Failed to flush batch file {}: {err}", path.display()))?;
+        self.count += 1;
+        Ok(VectorId(id))
+    }
+
+    fn write_vectors(
+        dir: &Path,
+        vectors: &[Vector<T>],
+        vectors_per_file: usize,
+    ) -> Result<(), String> {
+        for (batch_id, chunk) in vectors.chunks(vectors_per_file).enumerate() {
+            let path = dir.join(Self::batch_filename(batch_id));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|err| format!("Failed to create batch file {}: {err}", path.display()))?;
+            for vector in chunk {
+                Self::write_vector_to_file(&mut file, vector)?;
+            }
+            file.flush()
+                .map_err(|err| format!("Failed to flush batch file {}: {err}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn validate_vector(&self, vector: &Vector<T>) -> Result<(), String> {
+        if self.dimension == 0 {
+            return Err("Vector dimension must be > 0".to_string());
+        }
+        if vector.len() != self.dimension {
+            return Err(format!(
+                "Vector has dimension {}, expected {}",
+                vector.len(),
+                self.dimension
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_vector_to_file(file: &mut File, vector: &Vector<T>) -> Result<(), String> {
+        for &value in vector {
+            let bytes = value.to_le_bytes();
+            file.write_all(&bytes)
+                .map_err(|err| format!("Failed to write vector data: {err}"))?;
+        }
+        Ok(())
+    }
+
+    fn record_len(&self) -> usize {
+        self.dimension
+            .checked_mul(T::BYTE_SIZE)
+            .expect("Vector dimension is too large")
+    }
+
+    fn batch_filename(batch_id: usize) -> String {
+        format!("batch_{batch_id}.bin")
+    }
+
+    fn batch_path(&self, batch_id: usize) -> PathBuf {
+        self.dir.join(Self::batch_filename(batch_id))
+    }
+
+    fn parse_batch_filename(name: &str) -> Option<usize> {
+        let name = name.strip_prefix("batch_")?;
+        let name = name.strip_suffix(".bin")?;
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        name.parse().ok()
+    }
+
+    fn list_batch_ids(dir: &Path) -> Result<Vec<usize>, String> {
+        let mut ids = Vec::new();
+        let entries = std::fs::read_dir(dir)
+            .map_err(|err| format!("Failed to read data store directory {}: {err}", dir.display()))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                format!("Failed to read entry in data store {}: {err}", dir.display())
+            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|err| format!("Failed to read entry type: {err}"))?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(id) = Self::parse_batch_filename(&name) {
+                ids.push(id);
             }
         }
 
-        file.flush()
-            .map_err(|err| format!("Failed to flush vector data: {err}"))?;
-        Ok(())
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    fn count_vectors_in_batches(
+        dir: &Path,
+        batch_ids: &[usize],
+        record_len: usize,
+        vectors_per_file: usize,
+    ) -> Result<usize, String> {
+        for (expected, id) in batch_ids.iter().enumerate() {
+            if *id != expected {
+                return Err(format!("Data store is missing batch file for id {expected}"));
+            }
+        }
+
+        let mut total = 0usize;
+        let last_index = batch_ids.len().saturating_sub(1);
+        for (idx, batch_id) in batch_ids.iter().enumerate() {
+            let path = dir.join(Self::batch_filename(*batch_id));
+            let file_len = std::fs::metadata(&path)
+                .map_err(|err| format!("Failed to read {} metadata: {err}", path.display()))?
+                .len() as usize;
+            if file_len == 0 {
+                return Err(format!("Batch file {} is empty", path.display()));
+            }
+            if !file_len.is_multiple_of(record_len) {
+                return Err(format!(
+                    "Batch file {} size {file_len} is not a multiple of {record_len}",
+                    path.display()
+                ));
+            }
+            let count = file_len / record_len;
+            if count > vectors_per_file {
+                return Err(format!(
+                    "Batch file {} holds {count} vectors, exceeds max {vectors_per_file}",
+                    path.display()
+                ));
+            }
+            if idx < last_index && count != vectors_per_file {
+                return Err(format!(
+                    "Batch file {} holds {count} vectors, expected {vectors_per_file}",
+                    path.display()
+                ));
+            }
+            total = total
+                .checked_add(count)
+                .ok_or_else(|| "Vector count overflowed".to_string())?;
+        }
+
+        Ok(total)
     }
 }
 
 impl<T: Scalar> Drop for DataStore<T> {
     fn drop(&mut self) {
         if self.cleanup_on_drop {
-            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 }
@@ -358,6 +548,24 @@ impl<T: Scalar> SpannIndex<T> {
     }
 
     /// Initialize index with raw data and number of centroids (k),
+    /// while customizing how many vectors are stored per batch file.
+    pub fn build_with_vectors_per_file(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            k_centroids,
+            epsilon_closure,
+            move |dim, data| DataStore::from_vectors_with_batch(dim, data, vectors_per_file),
+        )
+    }
+
+    /// Initialize index with raw data and number of centroids (k),
     /// while specifying where the on-disk store should live.
     pub fn build_with_store_dir(
         dimension: usize,
@@ -374,6 +582,62 @@ impl<T: Scalar> SpannIndex<T> {
             epsilon_closure,
             move |dim, data| DataStore::from_vectors_in_dir(dim, data, &store_dir),
         )
+    }
+
+    /// Initialize index with raw data and number of centroids (k),
+    /// while specifying where the on-disk store should live and the batch size.
+    pub fn build_with_store_dir_and_batch(
+        dimension: usize,
+        raw_data: Vec<Vector<T>>,
+        k_centroids: usize,
+        epsilon_closure: f32,
+        store_dir: impl AsRef<Path>,
+        vectors_per_file: usize,
+    ) -> Result<Self, String> {
+        let store_dir = store_dir.as_ref().to_path_buf();
+        Self::build_with_store(
+            dimension,
+            raw_data,
+            k_centroids,
+            epsilon_closure,
+            move |dim, data| {
+                DataStore::from_vectors_in_dir_with_batch(dim, data, &store_dir, vectors_per_file)
+            },
+        )
+    }
+
+    /// Adds a new vector to the store and assigns it to posting lists.
+    /// Centroids are kept fixed, so this is a lightweight incremental path.
+    pub fn add_vector(&mut self, vector: Vector<T>) -> Result<usize, String> {
+        if vector.len() != self.dimension {
+            return Err(format!(
+                "Vector has dimension {}, expected {}",
+                vector.len(),
+                self.dimension
+            ));
+        }
+
+        let vid = self.store.append_vector(&vector)?;
+        let distances: Vec<(usize, f32)> = self
+            .posting_lists
+            .iter()
+            .enumerate()
+            .map(|(i, pl)| (i, squared_euclidean(&vector, &pl.centroid)))
+            .collect();
+
+        let min_dist = distances
+            .iter()
+            .map(|(_, d)| *d)
+            .fold(f32::INFINITY, |a, b| a.min(b));
+        let threshold = min_dist * (1.0 + self.epsilon_closure).powi(2);
+
+        for (i, dist) in distances {
+            if dist <= threshold {
+                self.posting_lists[i].members.push(vid);
+            }
+        }
+
+        Ok(vid.0)
     }
 
     fn build_with_store<F>(

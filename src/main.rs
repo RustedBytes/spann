@@ -37,16 +37,43 @@ fn main() {
     let k_centroids = 2;
     let epsilon_closure = 0.15;
 
-    let store_dir = std::env::args().nth(1);
-    let index = match store_dir {
-        Some(dir) => spann::SpannIndex::<f16>::build_with_store_dir(
+    let mut args = std::env::args().skip(1);
+    let store_dir = args.next();
+    let vectors_per_file = match args.next() {
+        Some(value) => match value.parse::<usize>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                eprintln!("Invalid vectors_per_file value: {value}");
+                return;
+            }
+        },
+        None => None,
+    };
+
+    let index = match (store_dir, vectors_per_file) {
+        (Some(dir), Some(vectors_per_file)) => spann::SpannIndex::<f16>::build_with_store_dir_and_batch(
+            dimension,
+            data,
+            k_centroids,
+            epsilon_closure,
+            dir,
+            vectors_per_file,
+        ),
+        (Some(dir), None) => spann::SpannIndex::<f16>::build_with_store_dir(
             dimension,
             data,
             k_centroids,
             epsilon_closure,
             dir,
         ),
-        None => spann::SpannIndex::<f16>::build(dimension, data, k_centroids, epsilon_closure),
+        (None, Some(vectors_per_file)) => spann::SpannIndex::<f16>::build_with_vectors_per_file(
+            dimension,
+            data,
+            k_centroids,
+            epsilon_closure,
+            vectors_per_file,
+        ),
+        (None, None) => spann::SpannIndex::<f16>::build(dimension, data, k_centroids, epsilon_closure),
     };
     let index = match index {
         Ok(index) => index,

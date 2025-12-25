@@ -26,6 +26,12 @@ Persist the vector store into a directory:
 cargo run --release -- /path/to/store_dir
 ```
 
+Optionally pass `vectors_per_file` as a second argument to control batch size:
+
+```bash
+cargo run --release -- /path/to/store_dir 2048
+```
+
 The demo in `src/main.rs` generates 1,000,000 vectors of dimension 128 (two clusters),
 builds the index, and runs a k-NN query against it.
 
@@ -56,7 +62,7 @@ let results = index.search(&query, k, rng_factor);
    - Seed `k` centroids from the first vectors and run a small, fixed number of k-means
      iterations for refinement.
    - Assign each vector to all centroids within an epsilon-closure distance.
-   - Store raw vectors on disk in a flat binary file.
+  - Store raw vectors on disk in batch files inside a directory.
 
 2. **Search**
    - Compute distances from the query to all centroids.
@@ -71,8 +77,8 @@ let results = index.search(&query, k, rng_factor);
 
 ## Notes and limitations
 
-- This is a POC, not a production index. There is no incremental update or delete path.
-- The data store is a simple flat file; vector IDs are implicit and fixed at build time.
+- This is a POC, not a production index. There is no delete path, and centroids are not updated.
+- The data store uses batch files; vector IDs map to positions within a batch, and new vectors can be appended.
 - The demo dataset is intentionally large and can be slow or memory-heavy on small machines.
 - Distance is squared Euclidean; there is no cosine or inner-product mode.
 
